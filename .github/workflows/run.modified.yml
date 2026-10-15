@@ -1,0 +1,482 @@
+name: Build rules dat files
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 22 * * *" # 6:30 AM UTC+8
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - "**/README.md"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Set variables
+        run: |
+          echo "GOAMD64=v3" >> $GITHUB_ENV
+          echo "BUILDTIME=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')" >> $GITHUB_ENV
+          # ---------------------------------------------------------------
+          # 变量 1：同时作用于 geosite 和 geosite-lite
+          # 变量 2：同时作用于 geoip 和 geoip-lite
+          # 语法：  名称(去重1,去重2)|名称|名称
+          #   "|"  分隔 —— 只保留这些名称对应的清洗文本（白名单），留空 = 保留全部
+          #   "()" 内用 "," 分隔 —— 从该名称里去掉与括号内各列表重复的规则
+          # 例：google(google@ads,google@cn)|cn|bing
+          #   => 保留 google、cn、bing 三个文件；google 中与 google@ads、google@cn 重复的规则被删除
+          # geosite 里的 cn-lite 由 geolocation-cn(geo) + cn(geo-lite) 合并而来，需要保留就写进变量
+          # ---------------------------------------------------------------
+          echo "GEOSITE_RULES=google(google@ads,google@cn)|cn|cn-lite|bing" >> $GITHUB_ENV
+          echo "GEOIP_RULES=cn|private|telegram|netflix" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Checkout the current repo
+        uses: actions/checkout@v4
+
+      - name: Checkout Loyalsoldier/domain-list-custom
+        uses: actions/checkout@v4
+        with:
+          repository: Loyalsoldier/domain-list-custom
+          path: custom
+
+      - name: Checkout v2fly/domain-list-community
+        uses: actions/checkout@v4
+        with:
+          repository: v2fly/domain-list-community
+          path: community
+
+      - name: Checkout MetaCubeX/meta-rules-converter
+        uses: actions/checkout@v4
+        with:
+          repository: MetaCubeX/meta-rules-converter
+          path: convert
+
+      - name: Checkout MetaCubeX/meta-rules-dat (meta branch, .list sources)
+        uses: actions/checkout@v4
+        with:
+          repository: MetaCubeX/meta-rules-dat
+          ref: meta
+          path: meta-src
+          sparse-checkout: |
+            geo
+            geo-lite
+
+      - name: Checkout Loyalsoldier/geoip
+        uses: actions/checkout@v4
+        with:
+          repository: Loyalsoldier/geoip
+          path: geoip-builder
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: ./custom/go.sum
+
+      - name: Write list cleaning script
+        run: |
+          cat > /tmp/clean_list.py <<'PYEOF'
+          #!/usr/bin/env python3
+          """Clean meta-rules-dat *.list files into geosite / geoip source text."""
+          import argparse
+          import ipaddress
+          import os
+          import re
+          import sys
+
+          DOMAIN_RE = re.compile(r'^[a-z0-9_.-]+$')
+          NAME_RE = {
+              'geosite': re.compile(r'^[a-z0-9!-]+$'),
+              'geoip': re.compile(r'^[a-z0-9_-]+$'),
+          }
+
+
+          def warn(msg):
+              print('::warning::' + msg, flush=True)
+
+
+          def parse_geosite(path):
+              out = set()
+              with open(path, encoding='utf-8', errors='ignore') as f:
+                  for raw in f:
+                      line = raw.strip()
+                      if not line or line.startswith('#'):
+                          continue
+                      rtype, _, rest = line.partition(',')
+                      rtype = rtype.strip().upper()
+                      rest = rest.strip()
+                      if rtype == 'DOMAIN-REGEX':
+                          if rest:
+                              out.add(('regexp', rest))
+                          continue
+                      value = rest.split(',')[0].strip().lower()
+                      if rtype in ('DOMAIN-SUFFIX', 'DOMAIN'):
+                          value = value.lstrip('+').lstrip('.')
+                          if not DOMAIN_RE.match(value):
+                              continue
+                          out.add(('domain' if rtype == 'DOMAIN-SUFFIX' else 'full', value))
+                      elif rtype == 'DOMAIN-KEYWORD':
+                          if value:
+                              out.add(('keyword', value))
+              return out
+
+
+          def parse_geoip(path):
+              out = set()
+              with open(path, encoding='utf-8', errors='ignore') as f:
+                  for raw in f:
+                      line = raw.strip()
+                      if not line or line.startswith('#'):
+                          continue
+                      rtype, _, rest = line.partition(',')
+                      rtype = rtype.strip().upper()
+                      if rtype in ('IP-CIDR', 'IP-CIDR6'):
+                          cand = rest.split(',')[0].strip()
+                      elif not rest:
+                          cand = line
+                      else:
+                          continue
+                      try:
+                          out.add(str(ipaddress.ip_network(cand, strict=False)))
+                      except ValueError:
+                          continue
+              return out
+
+
+          def fmt_geosite(rules):
+              lines = {(v if t == 'domain' else t + ':' + v) for t, v in rules}
+              return sorted(lines, key=lambda s: (s.lower(), s))
+
+
+          def fmt_geoip(rules):
+              nets = [ipaddress.ip_network(x) for x in rules]
+              nets.sort(key=lambda n: (n.version, int(n.network_address), n.prefixlen))
+              return [str(n) for n in nets]
+
+
+          def parse_spec(spec):
+              items = []
+              for part in spec.split('|'):
+                  part = part.strip()
+                  if not part:
+                      continue
+                  m = re.fullmatch(r'([^()]+?)\s*(?:\(([^()]*)\))?', part)
+                  if not m:
+                      print('::error::bad rule item: ' + part)
+                      sys.exit(1)
+                  name = m.group(1).strip().lower()
+                  subs = [s.strip().lower() for s in (m.group(2) or '').split(',') if s.strip()]
+                  items.append((name, subs))
+              return items
+
+
+          def main():
+              ap = argparse.ArgumentParser()
+              ap.add_argument('--kind', required=True, choices=['geosite', 'geoip'])
+              ap.add_argument('--src', required=True, help='directory with *.list files')
+              ap.add_argument('--out', required=True)
+              ap.add_argument('--rules', default='')
+              ap.add_argument('--extra', action='append', default=[],
+                              help='NAME=file1,file2  merge several .list files into one new list')
+              args = ap.parse_args()
+
+              parse = parse_geosite if args.kind == 'geosite' else parse_geoip
+              fmt = fmt_geosite if args.kind == 'geosite' else fmt_geoip
+              name_ok = NAME_RE[args.kind]
+
+              index = {fn[:-5].lower(): os.path.join(args.src, fn)
+                       for fn in os.listdir(args.src) if fn.endswith('.list')}
+              extra = {}
+              for spec in args.extra:
+                  name, _, files = spec.partition('=')
+                  extra[name.strip().lower()] = [x.strip() for x in files.split(',') if x.strip()]
+
+              cache = {}
+
+              def get(name):
+                  if name in cache:
+                      return cache[name]
+                  if name in extra:
+                      files = extra[name]
+                  elif name in index:
+                      files = [index[name]]
+                  else:
+                      cache[name] = None
+                      return None
+                  data = set()
+                  for p in files:
+                      if os.path.isfile(p):
+                          data |= parse(p)
+                      else:
+                          warn('missing source file for %s: %s' % (name, p))
+                  cache[name] = data
+                  return data
+
+              items = parse_spec(args.rules)
+              keep_all = not items
+              if keep_all:
+                  items = [(n, []) for n in sorted(set(index) | set(extra))]
+
+              os.makedirs(args.out, exist_ok=True)
+              written = 0
+              for name, subs in items:
+                  if not name_ok.match(name):
+                      if not keep_all:
+                          warn('invalid list name, skipped: ' + name)
+                      continue
+                  data = get(name)
+                  if data is None:
+                      warn('%s not found in %s, skipped' % (name, args.src))
+                      continue
+                  data = set(data)
+                  for sub in subs:
+                      sub_data = get(sub)
+                      if sub_data is None:
+                          warn('%s (used to dedupe %s) not found in %s' % (sub, name, args.src))
+                          continue
+                      data -= sub_data
+                  if not data:
+                      warn('%s is empty after cleaning, skipped' % name)
+                      continue
+                  fname = name if args.kind == 'geosite' else name + '.txt'
+                  with open(os.path.join(args.out, fname), 'w', encoding='utf-8') as f:
+                      f.write('\n'.join(fmt(data)) + '\n')
+                  print('%-32s %d rules' % (name, len(data)))
+                  written += 1
+              print('wrote %d lists to %s' % (written, args.out))
+              if written == 0:
+                  print('::error::nothing written to ' + args.out)
+                  sys.exit(1)
+
+
+          if __name__ == '__main__':
+              main()
+          PYEOF
+
+      - name: Clean geosite and geosite-lite from .list files
+        run: |
+          # data directories are rebuilt only from the meta branch .list files
+          rm -rf ./community/data ./community/data-lite
+          mkdir -p ./community/data ./community/data-lite
+          # geosite  <- meta/geo/geosite ; cn-lite = geosite:geolocation-cn + geosite-lite:cn
+          python3 /tmp/clean_list.py --kind geosite \
+            --src ./meta-src/geo/geosite --out ./community/data \
+            --rules "$GEOSITE_RULES" \
+            --extra "cn-lite=./meta-src/geo/geosite/geolocation-cn.list,./meta-src/geo-lite/geosite/cn.list"
+          # geosite-lite  <- meta/geo-lite/geosite
+          python3 /tmp/clean_list.py --kind geosite \
+            --src ./meta-src/geo-lite/geosite --out ./community/data-lite \
+            --rules "$GEOSITE_RULES"
+
+      - name: Clean geoip and geoip-lite from .list files
+        run: |
+          rm -rf ./geoip-data
+          # geoip  <- meta/geo/geoip
+          python3 /tmp/clean_list.py --kind geoip \
+            --src ./meta-src/geo/geoip --out ./geoip-data/full \
+            --rules "$GEOIP_RULES"
+          # geoip-lite  <- meta/geo-lite/geoip
+          python3 /tmp/clean_list.py --kind geoip \
+            --src ./meta-src/geo-lite/geoip --out ./geoip-data/lite \
+            --rules "$GEOIP_RULES"
+
+      - name: Build geosite.dat file
+        run: |
+          cd custom || exit 1
+          go run ./ --datapath=../community/data
+
+      - name: Build geosite-lite.dat file
+        env:
+          NO_SKIP: true
+        run: |
+          cd community || exit 1
+          mkdir -p data-lite
+          go run ./ --datapath=./data-lite --outputname geosite-lite.dat
+
+      - name: Build geoip.dat relative files
+        run: |
+          mkdir -p geoip-out
+          mk_config() {
+            python3 - "$1" "$2" "$3" <<'PY'
+          import json, os, sys
+          src, dat, cfg = sys.argv[1:4]
+          inputs = [{"type": "text", "action": "add",
+                     "args": {"name": f[:-4], "uri": os.path.abspath(os.path.join(src, f))}}
+                    for f in sorted(os.listdir(src)) if f.endswith(".txt")]
+          out = [{"type": "v2rayGeoIPDat", "action": "output",
+                  "args": {"outputName": dat, "outputDir": os.path.abspath("geoip-out")}}]
+          json.dump({"input": inputs, "output": out}, open(cfg, "w"), indent=2)
+          PY
+          }
+          mk_config ./geoip-data/full geoip.dat ./geoip-full.json
+          mk_config ./geoip-data/lite geoip-lite.dat ./geoip-lite.json
+          cd geoip-builder || exit 1
+          go run ./ -c ../geoip-full.json
+          go run ./ -c ../geoip-lite.json
+          cd ..
+          cp ./geoip-out/geoip.dat ./geoip.dat
+          cp ./geoip-out/geoip-lite.dat ./geoip-lite.dat
+
+      - name: Build db and metadb file
+        env:
+          NO_SKIP: true
+        run: |
+          go install -trimpath -ldflags="-s -w -buildid=" github.com/metacubex/geo/cmd/geo@master
+          geo convert site -i v2ray -o sing -f geosite.db ./custom/publish/geosite.dat
+          geo convert site -i v2ray -o sing -f geosite-lite.db ./community/geosite-lite.dat
+          geo convert ip -i v2ray -o sing -f geoip.db ./geoip.dat
+          geo convert ip -i v2ray -o meta -f geoip.metadb ./geoip.dat
+          geo convert ip -i v2ray -o sing -f geoip-lite.db ./geoip-lite.dat
+          geo convert ip -i v2ray -o meta -f geoip-lite.metadb ./geoip-lite.dat
+
+      - name: Convert geo to sing-rule-set
+        env:
+          NO_SKIP: true
+        run: |
+          mkdir -p sing-rule/geo/geosite && mkdir -p sing-rule/geo/geoip
+          cd convert
+          go run ./ geosite -f ../custom/publish/geosite.dat -o ../sing-rule/geo/geosite -t sing-box
+          go run ./ geoip -f ../geoip.dat -o ../sing-rule/geo/geoip -t sing-box
+
+      - name: Convert geo-lite to sing-rule-set
+        env:
+          NO_SKIP: true
+        run: |
+          mkdir -p sing-rule/geo-lite/geosite && mkdir -p sing-rule/geo-lite/geoip
+          cd convert
+          go run ./ geosite -f ../community/geosite-lite.dat -o ../sing-rule/geo-lite/geosite -t sing-box
+          go run ./ geoip -f ../geoip-lite.dat -o ../sing-rule/geo-lite/geoip -t sing-box
+
+      - name: Convert geo to meta-rule-set
+        env:
+          NO_SKIP: true
+        run: |
+          mkdir -p meta-rule/geo/geosite && mkdir -p meta-rule/geo/geoip
+          cd convert
+          go run ./ geosite -f ../custom/publish/geosite.dat -o ../meta-rule/geo/geosite
+          go run ./ geoip -f ../geoip.dat -o ../meta-rule/geo/geoip
+
+      - name: Convert geo-lite to meta-rule-set
+        env:
+          NO_SKIP: true
+        run: |
+          mkdir -p meta-rule/geo-lite/geosite && mkdir -p meta-rule/geo-lite/geoip
+          cd convert
+          go run ./ geosite -f ../community/geosite-lite.dat -o ../meta-rule/geo-lite/geosite
+          go run ./ geoip -f ../geoip-lite.dat -o ../meta-rule/geo-lite/geoip
+
+      - name: Convert asn
+        env:
+          NO_SKIP: true
+        run: |
+          mkdir -p meta-rule/asn && mkdir -p sing-rule/asn
+          cd convert
+          wget https://raw.githubusercontent.com/xishang0128/geoip/release/GeoLite2-ASN.mmdb
+          go run ./ asn -o ../meta-rule/asn
+          go run ./ asn -o ../sing-rule/asn -t sing-box
+
+      # - name: Convert bm7-rule-set to sing-rule-set
+      #   env:
+      #     NO_SKIP: true
+      #   run: |
+      #     mkdir -p ./sing-rule/bm7
+      #     cp ./resouces/bm7.sh ./sing-rule/bm7/
+      #     cd ./sing-rule/bm7
+      #     wget https://github.com/SagerNet/sing-box/releases/download/v1.8.0-alpha.1/sing-box-1.8.0-alpha.1-linux-amd64.tar.gz -O sing-box.tar.gz && tar zxvf sing-box.tar.gz && mv sing-box-1.8.0-alpha.1-linux-amd64/sing-box ./ && rm -r sing-box-1.8.0-alpha.1-linux-amd64
+      #     ls
+      #     chmod 755 bm7.sh && ./bm7.sh
+      #     rm -r bm7.sh sing-box* rule
+
+      - name: Build BundleMRS.7z
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+          cd meta-rule
+          7z a ../BundleMRS.7z -mx=1 -r *.mrs
+
+      - name: Move and zip files
+        run: |
+          mkdir -p ./publish/
+          wget https://raw.githubusercontent.com/xishang0128/geoip/release/Country.mmdb -O ./publish/country-lite.mmdb
+          wget https://raw.githubusercontent.com/Loyalsoldier/geoip/release/Country.mmdb -O ./publish/country.mmdb
+          wget https://raw.githubusercontent.com/xishang0128/geoip/release/GeoLite2-ASN.mmdb -O ./publish/GeoLite2-ASN.mmdb
+          install -Dp ./geoip-lite.dat ./publish/
+          install -Dp ./geoip.dat ./publish/
+          install -Dp ./custom/publish/geosite.dat ./publish/
+          install -Dp ./community/geosite-lite.dat ./publish/
+          install -Dp ./geosite.db ./publish/
+          install -Dp ./geosite-lite.db ./publish/
+          install -Dp ./geoip.db ./publish/
+          install -Dp ./geoip-lite.db ./publish/
+          install -Dp ./geoip.metadb ./publish/
+          install -Dp ./geoip-lite.metadb ./publish/
+          install -Dp ./BundleMRS.7z ./publish/
+          cd ./publish || exit 1
+          sha256sum country.mmdb > country.mmdb.sha256sum
+          sha256sum country-lite.mmdb > country-lite.mmdb.sha256sum
+          sha256sum geoip-lite.dat > geoip-lite.dat.sha256sum
+          sha256sum geoip.dat > geoip.dat.sha256sum
+          sha256sum geosite.dat > geosite.dat.sha256sum
+          sha256sum geosite-lite.dat > geosite-lite.dat.sha256sum
+          sha256sum geosite.db > geosite.db.sha256sum
+          sha256sum geosite-lite.db > geosite-lite.db.sha256sum
+          sha256sum geoip.db > geoip.db.sha256sum
+          sha256sum geoip-lite.db > geoip-lite.db.sha256sum
+          sha256sum geoip.metadb > geoip.metadb.sha256sum
+          sha256sum geoip-lite.metadb > geoip-lite.metadb.sha256sum
+          sha256sum BundleMRS.7z > BundleMRS.7z.sha256sum
+          sha256sum GeoLite2-ASN.mmdb > GeoLite2-ASN.mmdb.sha256sum
+
+      - name: Delete release if exist then create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --cleanup-tag -y || true
+          gh release create latest --title "Release ${{ env.BUILDTIME }}" ./publish/*
+
+      - name: Git push assets to "release" branch
+        run: |
+          cd publish || exit 1
+          git init
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b release
+          git add .
+          git commit -m "Released on ${{ env.BUILDTIME }}"
+          git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git push -f -u origin release
+
+      - name: Git push assets to "sing-rule" branch
+        run: |
+          cd sing-rule || exit 1
+          git init
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b sing
+          git add .
+          git commit -m "Released on ${{ env.BUILDTIME }}"
+          git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git push -f -u origin sing
+
+      - name: Git push assets to "meta-rule" branch
+        run: |
+          cd meta-rule || exit 1
+          git init
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b meta
+          git add .
+          git commit -m "Released on ${{ env.BUILDTIME }}"
+          git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git push -f -u origin meta
+
+      - name: Purge jsdelivr CDN
+        run: |
+          cd publish || exit 1
+          for file in $(ls); do
+            curl -i "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}"
+          done
