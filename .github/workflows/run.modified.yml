@@ -445,7 +445,8 @@ jobs:
           mkdir -p ./publish/
           cp ./geoip-out/country-lite.mmdb ./publish/country-lite.mmdb
           cp ./geoip-out/country.mmdb ./publish/country.mmdb
-          wget https://raw.githubusercontent.com/xishang0128/geoip/release/GeoLite2-ASN.mmdb -O ./publish/GeoLite2-ASN.mmdb
+          cp ./geoip-out/GeoLite2-ASN.mmdb ./publish/GeoLite2-ASN.mmdb
+          # wget https://raw.githubusercontent.com/xishang0128/geoip/release/GeoLite2-ASN.mmdb -O ./publish/GeoLite2-ASN.mmdb
           install -Dp ./geoip-lite.dat ./publish/
           install -Dp ./geoip.dat ./publish/
           install -Dp ./custom/publish/geosite.dat ./publish/
