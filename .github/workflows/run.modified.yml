@@ -30,7 +30,7 @@ jobs:
           #   => 保留 google、cn、bing 三个文件；google 中与 google@ads、google@cn 重复的规则被删除
           # geosite 里的 cn-lite 由 geolocation-cn(geo) + cn(geo-lite) 合并而来，需要保留就写进变量
           # ---------------------------------------------------------------
-          echo "GEOSITE_RULES=google(google-cn,google-scholar)|cn|cn-lite|bing" >> $GITHUB_ENV
+          echo "GEOSITE_RULES=google(google-cn,google-schola)|cn|cn-lite|bing" >> $GITHUB_ENV
           echo "GEOIP_RULES=cn|private|telegram|netflix" >> $GITHUB_ENV
         shell: bash
 
@@ -99,12 +99,30 @@ jobs:
               print('::warning::' + msg, flush=True)
 
 
+          def clean_line(raw):
+              line = raw.strip()
+              if line.startswith('- '):
+                  line = line[2:].strip()
+              return line.strip('\'"').strip()
+
+
           def parse_geosite(path):
               out = set()
               with open(path, encoding='utf-8', errors='ignore') as f:
                   for raw in f:
-                      line = raw.strip()
-                      if not line or line.startswith('#'):
+                      line = clean_line(raw)
+                      if not line or line.startswith('#') or line.lower().startswith('payload'):
+                          continue
+                      if ',' not in line:
+                          # domain-behavior text: "+.a.com" / ".a.com" = suffix, "a.com" = exact
+                          if line.startswith('+.') or line.startswith('.'):
+                              value = line.lstrip('+').lstrip('.').lower()
+                              rtype = 'DOMAIN-SUFFIX'
+                          else:
+                              value = line.lower()
+                              rtype = 'DOMAIN'
+                          if DOMAIN_RE.match(value):
+                              out.add(('domain' if rtype == 'DOMAIN-SUFFIX' else 'full', value))
                           continue
                       rtype, _, rest = line.partition(',')
                       rtype = rtype.strip().upper()
@@ -129,8 +147,8 @@ jobs:
               out = set()
               with open(path, encoding='utf-8', errors='ignore') as f:
                   for raw in f:
-                      line = raw.strip()
-                      if not line or line.startswith('#'):
+                      line = clean_line(raw)
+                      if not line or line.startswith('#') or line.lower().startswith('payload'):
                           continue
                       rtype, _, rest = line.partition(',')
                       rtype = rtype.strip().upper()
@@ -241,6 +259,13 @@ jobs:
                       data -= sub_data
                   if not data:
                       warn('%s is empty after cleaning, skipped' % name)
+                      src_file = extra.get(name, [index.get(name)])[0]
+                      try:
+                          with open(src_file, encoding='utf-8', errors='ignore') as fh:
+                              head = [next(fh, '').rstrip() for _ in range(6)]
+                          print('first lines of %s: %r' % (src_file, head))
+                      except Exception as e:
+                          print('cannot read %s: %s' % (src_file, e))
                       continue
                   fname = name if args.kind == 'geosite' else name + '.txt'
                   with open(os.path.join(args.out, fname), 'w', encoding='utf-8') as f:
