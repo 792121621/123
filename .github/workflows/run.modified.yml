@@ -165,6 +165,23 @@ jobs:
               return out
 
 
+          def parse_geosite_text(path):
+              """parse cleaned geosite text: full:/domain:/keyword:/regexp: prefix, bare = domain"""
+              out = set()
+              with open(path, encoding='utf-8', errors='ignore') as f:
+                  for raw in f:
+                      line = raw.strip()
+                      if not line or line.startswith('#'):
+                          continue
+                      m = re.match(r'^(full|domain|keyword|regexp):(.+)$', line)
+                      if m:
+                          t, v = m.group(1), m.group(2).strip()
+                          out.add((t, v if t == 'regexp' else v.lower()))
+                      elif DOMAIN_RE.match(line.lower()):
+                          out.add(('domain', line.lower()))
+              return out
+
+
           def fmt_geosite(rules):
               lines = {(v if t == 'domain' else t + ':' + v) for t, v in rules}
               return sorted(lines, key=lambda s: (s.lower(), s))
@@ -194,24 +211,37 @@ jobs:
 
           def main():
               ap = argparse.ArgumentParser()
+              ap.add_argument('--stage', required=True, choices=['import', 'clean'],
+                              help='import: .list -> raw text (no deletion); clean: raw text -> whitelist + dedupe')
               ap.add_argument('--kind', required=True, choices=['geosite', 'geoip'])
-              ap.add_argument('--src', required=True, help='directory with *.list files')
+              ap.add_argument('--src', required=True)
               ap.add_argument('--out', required=True)
               ap.add_argument('--rules', default='')
               ap.add_argument('--extra', action='append', default=[],
-                              help='NAME=file1,file2  merge several .list files into one new list')
+                              help='(import) NAME=file1,file2  merge several .list files into one new raw list')
               args = ap.parse_args()
 
-              parse = parse_geosite if args.kind == 'geosite' else parse_geoip
-              fmt = fmt_geosite if args.kind == 'geosite' else fmt_geoip
+              importing = args.stage == 'import'
+              is_site = args.kind == 'geosite'
+              fmt = fmt_geosite if is_site else fmt_geoip
               name_ok = NAME_RE[args.kind]
 
-              index = {fn[:-5].lower(): os.path.join(args.src, fn)
-                       for fn in os.listdir(args.src) if fn.endswith('.list')}
+              if importing:
+                  parse = parse_geosite if is_site else parse_geoip
+                  index = {fn[:-5].lower(): os.path.join(args.src, fn)
+                           for fn in os.listdir(args.src) if fn.endswith('.list')}
+              else:
+                  parse = parse_geosite_text if is_site else parse_geoip
+                  if is_site:
+                      index = {fn.lower(): os.path.join(args.src, fn) for fn in os.listdir(args.src)}
+                  else:
+                      index = {fn[:-4].lower(): os.path.join(args.src, fn)
+                               for fn in os.listdir(args.src) if fn.endswith('.txt')}
               extra = {}
-              for spec in args.extra:
-                  name, _, files = spec.partition('=')
-                  extra[name.strip().lower()] = [x.strip() for x in files.split(',') if x.strip()]
+              if importing:
+                  for spec in args.extra:
+                      name, _, files = spec.partition('=')
+                      extra[name.strip().lower()] = [x.strip() for x in files.split(',') if x.strip()]
 
               cache = {}
 
@@ -234,15 +264,21 @@ jobs:
                   cache[name] = data
                   return data
 
-              items = parse_spec(args.rules)
-              keep_all = not items
-              if keep_all:
+              if importing:
+                  # stage 1: import everything (attribute lists such as google@ads and cn-lite included)
                   items = [(n, []) for n in sorted(set(index) | set(extra))]
+                  keep_all = True
+              else:
+                  # stage 2: whitelist + dedupe according to the rule variable
+                  items = parse_spec(args.rules)
+                  keep_all = not items
+                  if keep_all:
+                      items = [(n, []) for n in sorted(index)]
 
               os.makedirs(args.out, exist_ok=True)
               written = 0
               for name, subs in items:
-                  if not name_ok.match(name):
+                  if not importing and not name_ok.match(name):
                       if not keep_all:
                           warn('invalid list name, skipped: ' + name)
                       continue
@@ -258,7 +294,7 @@ jobs:
                           continue
                       data -= sub_data
                   if not data:
-                      warn('%s is empty after cleaning, skipped' % name)
+                      warn('%s is empty after %s, skipped' % (name, args.stage))
                       src_file = extra.get(name, [index.get(name)])[0]
                       try:
                           with open(src_file, encoding='utf-8', errors='ignore') as fh:
@@ -267,12 +303,12 @@ jobs:
                       except Exception as e:
                           print('cannot read %s: %s' % (src_file, e))
                       continue
-                  fname = name if args.kind == 'geosite' else name + '.txt'
+                  fname = name if is_site else name + '.txt'
                   with open(os.path.join(args.out, fname), 'w', encoding='utf-8') as f:
                       f.write('\n'.join(fmt(data)) + '\n')
                   print('%-32s %d rules' % (name, len(data)))
                   written += 1
-              print('wrote %d lists to %s' % (written, args.out))
+              print('[%s] wrote %d lists to %s' % (args.stage, written, args.out))
               if written == 0:
                   print('::error::nothing written to ' + args.out)
                   sys.exit(1)
@@ -282,31 +318,44 @@ jobs:
               main()
           PYEOF
 
-      - name: Clean geosite and geosite-lite from .list files
+      - name: Import geosite, geosite-lite, geoip, geoip-lite from .list files (incl. cn-lite)
         run: |
-          # data directories are rebuilt only from the meta branch .list files
-          rm -rf ./community/data ./community/data-lite
-          mkdir -p ./community/data ./community/data-lite
-          # geosite  <- meta/geo/geosite ; cn-lite = geosite:geolocation-cn + geosite-lite:cn
-          python3 /tmp/clean_list.py --kind geosite \
-            --src ./meta-src/geo/geosite --out ./community/data \
-            --rules "$GEOSITE_RULES" \
+          rm -rf ./raw
+          # geosite  <- meta/geo/geosite
+          # cn-lite  = geosite:geolocation-cn + geosite-lite:cn, imported here BEFORE any cleaning
+          python3 /tmp/clean_list.py --stage import --kind geosite \
+            --src ./meta-src/geo/geosite --out ./raw/geosite \
             --extra "cn-lite=./meta-src/geo/geosite/geolocation-cn.list,./meta-src/geo-lite/geosite/cn.list"
           # geosite-lite  <- meta/geo-lite/geosite
-          python3 /tmp/clean_list.py --kind geosite \
-            --src ./meta-src/geo-lite/geosite --out ./community/data-lite \
+          python3 /tmp/clean_list.py --stage import --kind geosite \
+            --src ./meta-src/geo-lite/geosite --out ./raw/geosite-lite
+          # geoip  <- meta/geo/geoip
+          python3 /tmp/clean_list.py --stage import --kind geoip \
+            --src ./meta-src/geo/geoip --out ./raw/geoip
+          # geoip-lite  <- meta/geo-lite/geoip
+          python3 /tmp/clean_list.py --stage import --kind geoip \
+            --src ./meta-src/geo-lite/geoip --out ./raw/geoip-lite
+
+      - name: Clean geosite and geosite-lite (whitelist + dedupe)
+        run: |
+          # data directories are rebuilt only from the imported raw text
+          rm -rf ./community/data ./community/data-lite
+          mkdir -p ./community/data ./community/data-lite
+          python3 /tmp/clean_list.py --stage clean --kind geosite \
+            --src ./raw/geosite --out ./community/data \
+            --rules "$GEOSITE_RULES"
+          python3 /tmp/clean_list.py --stage clean --kind geosite \
+            --src ./raw/geosite-lite --out ./community/data-lite \
             --rules "$GEOSITE_RULES"
 
-      - name: Clean geoip and geoip-lite from .list files
+      - name: Clean geoip and geoip-lite (whitelist + dedupe)
         run: |
           rm -rf ./geoip-data
-          # geoip  <- meta/geo/geoip
-          python3 /tmp/clean_list.py --kind geoip \
-            --src ./meta-src/geo/geoip --out ./geoip-data/full \
+          python3 /tmp/clean_list.py --stage clean --kind geoip \
+            --src ./raw/geoip --out ./geoip-data/full \
             --rules "$GEOIP_RULES"
-          # geoip-lite  <- meta/geo-lite/geoip
-          python3 /tmp/clean_list.py --kind geoip \
-            --src ./meta-src/geo-lite/geoip --out ./geoip-data/lite \
+          python3 /tmp/clean_list.py --stage clean --kind geoip \
+            --src ./raw/geoip-lite --out ./geoip-data/lite \
             --rules "$GEOIP_RULES"
 
       - name: Build geosite.dat file
