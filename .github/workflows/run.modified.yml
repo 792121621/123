@@ -312,7 +312,7 @@ jobs:
       - name: Build geosite.dat file
         run: |
           cd custom || exit 1
-          go run ./ --datapath=../community/data
+          go run ./ --datapath=../community/data --exportlists="" --togfwlist=""
 
       - name: Build geosite-lite.dat file
         env:
