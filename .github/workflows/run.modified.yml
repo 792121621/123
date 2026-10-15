@@ -340,8 +340,8 @@ jobs:
           mk_config ./geoip-data/full geoip.dat ./geoip-full.json
           mk_config ./geoip-data/lite geoip-lite.dat ./geoip-lite.json
           cd geoip-builder || exit 1
-          go run ./ -c ../geoip-full.json
-          go run ./ -c ../geoip-lite.json
+          go run ./ convert -c ../geoip-full.json
+          go run ./ convert -c ../geoip-lite.json
           cd ..
           cp ./geoip-out/geoip.dat ./geoip.dat
           cp ./geoip-out/geoip-lite.dat ./geoip-lite.dat
