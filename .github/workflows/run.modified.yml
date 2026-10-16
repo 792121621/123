@@ -32,7 +32,7 @@ jobs:
           #     +x  把 x 的规则合并进该名称
           #     -x  从该名称里去掉与 x 重复的规则
           #     没有 + 或 - 的项会被忽略
-          # 例：google(+google-cn,-google@ads,-google@cn)|cn|bing
+          # 例：google(+google-cn,-google@ads,-google@cn)|cn(-2)|bing
           #   => 保留 google、cn、bing；google 合并 google-cn，并去掉与 google@ads、google@cn 重复的规则
           # geosite 里的 cn-lite 由 geolocation-cn(geo) + cn(geo-lite) 合并而来，需要保留就写进变量
           # ---------------------------------------------------------------
