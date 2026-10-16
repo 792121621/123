@@ -26,14 +26,14 @@ jobs:
           # GEOIP_RULES         -> geoip
           # GEOIP_LITE_RULES    -> geoip-lite
           # (shell 变量名不能含 "-"，所以用下划线)
-          # 语法：  名称(+合并项,-去重项)|名称|名称
+          # 语法：  名称(+合并1,-去重1)|名称|名称
           #   "|"  分隔 —— 只保留这些名称对应的清洗文本（白名单），留空 = 保留全部
-          #   "()" 内用 "," 分隔，按书写顺序依次处理：
+          #   "()" 内用 "," 分隔：
           #     +x  把 x 的规则合并进该名称
           #     -x  从该名称里去掉与 x 重复的规则
-          #     既不是 + 也不是 - 的项不做任何修改（会给出警告）
-          # 例：google(+google-cn,-google@ads)|cn|bing
-          #   => 保留 google、cn、bing 三个文件；google 先并入 google-cn，再去掉与 google@ads 重复的规则
+          #     没有 + 或 - 的项会被忽略
+          # 例：google(+google-cn,-google@ads,-google@cn)|cn|bing
+          #   => 保留 google、cn、bing；google 合并 google-cn，并去掉与 google@ads、google@cn 重复的规则
           # geosite 里的 cn-lite 由 geolocation-cn(geo) + cn(geo-lite) 合并而来，需要保留就写进变量
           # ---------------------------------------------------------------
           echo "GEOSITE_RULES=google(+google-cn,-google-schola)|cn|cn-lite|bing" >> $GITHUB_ENV
@@ -213,17 +213,26 @@ jobs:
                       if tok[0] in '+-' and len(tok) > 1:
                           ops.append((tok[0], tok[1:].strip()))
                       else:
-                          warn('ignored "%s" in "%s": must start with + (merge) or - (remove)' % (tok, name))
+                          warn('ignored "%s" in "%s": needs a + or - prefix' % (tok, part))
                   items.append((name, ops))
               return items
+
+
+          def list_index(d):
+              if not d or not os.path.isdir(d):
+                  return {}
+              return {fn[:-5].lower(): os.path.join(d, fn)
+                      for fn in os.listdir(d) if fn.endswith('.list')}
 
 
           def main():
               ap = argparse.ArgumentParser()
               ap.add_argument('--kind', required=True, choices=['geosite', 'geoip'])
-              ap.add_argument('--src', action='append', required=True,
-                              help='directory with *.list files; repeat to merge same-named lists')
-              ap.add_argument('--out', required=True)
+              ap.add_argument('--src', required=True, help='meta directory with *.list files')
+              ap.add_argument('--custom-src', default='', help='custom directory with *.list files')
+              ap.add_argument('--out', required=True, help='output for lists that exist in meta')
+              ap.add_argument('--out-rs', default='',
+                              help='output for every kept list (meta + custom-only), rule-set builds only')
               ap.add_argument('--rules', default='')
               ap.add_argument('--extra', action='append', default=[],
                               help='NAME=file1,file2  merge several .list files into one new list')
@@ -233,28 +242,29 @@ jobs:
               fmt = fmt_geosite if args.kind == 'geosite' else fmt_geoip
               name_ok = NAME_RE[args.kind]
 
-              index = {}
-              for src in args.src:
-                  if not os.path.isdir(src):
-                      warn('source dir not found, ignored: ' + src)
-                      continue
-                  for fn in sorted(os.listdir(src)):
-                      if fn.endswith('.list'):
-                          index.setdefault(fn[:-5].lower(), []).append(os.path.join(src, fn))
+              index = list_index(args.src)
+              cindex = list_index(args.custom_src)
               extra = {}
               for spec in args.extra:
                   name, _, files = spec.partition('=')
                   extra[name.strip().lower()] = [x.strip() for x in files.split(',') if x.strip()]
 
-              cache = {}
+              def source_files(name):
+                  files = []
+                  if name in extra:
+                      files += extra[name]
+                  elif name in index:
+                      files.append(index[name])
+                  if name in cindex:      # same-name custom list is merged into the meta one
+                      files.append(cindex[name])
+                  return files
 
-              def files_of(name):
-                  return list(extra.get(name, [])) + index.get(name, [])
+              cache = {}
 
               def get(name):
                   if name in cache:
                       return cache[name]
-                  files = files_of(name)
+                  files = source_files(name)
                   if not files:
                       cache[name] = None
                       return None
@@ -270,9 +280,11 @@ jobs:
               items = parse_spec(args.rules)
               keep_all = not items
               if keep_all:
-                  items = [(n, []) for n in sorted(set(index) | set(extra))]
+                  items = [(n, []) for n in sorted(set(index) | set(extra) | set(cindex))]
 
               os.makedirs(args.out, exist_ok=True)
+              if args.out_rs:
+                  os.makedirs(args.out_rs, exist_ok=True)
               written = 0
               for name, ops in items:
                   if not name_ok.match(name):
@@ -281,13 +293,13 @@ jobs:
                       continue
                   data = get(name)
                   if data is None:
-                      warn('%s not found in %s, skipped' % (name, ', '.join(args.src)))
+                      warn('%s not found in meta or custom source (%s), skipped' % (name, args.src))
                       continue
                   data = set(data)
                   for sign, ref in ops:
                       ref_data = get(ref)
                       if ref_data is None:
-                          warn('%s (%s%s) not found, ignored' % (ref, sign, ref))
+                          warn('%s (used by %s%s of %s) not found, ignored' % (ref, sign, ref, name))
                           continue
                       if sign == '+':
                           data |= ref_data
@@ -295,20 +307,27 @@ jobs:
                           data -= ref_data
                   if not data:
                       warn('%s is empty after cleaning, skipped' % name)
-                      fl = files_of(name)
-                      if fl:
+                      files = source_files(name)
+                      if files:
                           try:
-                              with open(fl[0], encoding='utf-8', errors='ignore') as fh:
+                              with open(files[0], encoding='utf-8', errors='ignore') as fh:
                                   head = [next(fh, '').rstrip() for _ in range(6)]
-                              print('first lines of %s: %r' % (fl[0], head))
+                              print('first lines of %s: %r' % (files[0], head))
                           except Exception as e:
-                              print('cannot read %s: %s' % (fl[0], e))
+                              print('cannot read %s: %s' % (files[0], e))
                       continue
                   fname = name if args.kind == 'geosite' else name + '.txt'
-                  with open(os.path.join(args.out, fname), 'w', encoding='utf-8') as f:
-                      f.write('\n'.join(fmt(data)) + '\n')
-                  print('%-32s %d rules' % (name, len(data)))
-                  written += 1
+                  text = '\n'.join(fmt(data)) + '\n'
+                  in_meta = name in index or name in extra
+                  targets = ([args.out] if in_meta else []) + ([args.out_rs] if args.out_rs else [])
+                  for d in targets:
+                      with open(os.path.join(d, fname), 'w', encoding='utf-8') as f:
+                          f.write(text)
+                  print('%-32s %d rules  [%s]' % (name, len(data),
+                        ('meta' if name in index or name in extra else 'custom-only')
+                        + ('+custom' if name in cindex and in_meta else '')))
+                  if in_meta:
+                      written += 1
               print('wrote %d lists to %s' % (written, args.out))
               if written == 0:
                   print('::error::nothing written to ' + args.out)
@@ -321,28 +340,19 @@ jobs:
 
       - name: Clean geosite and geosite-lite from .list files
         run: |
-          # data directories are rebuilt only from .list files
-          #   data / data-lite       : meta source only        -> geosite.dat / geosite-lite.dat (published)
-          #   data-rs / data-lite-rs : meta + custom source    -> rule-set (.mrs/.yaml/.list/.srs/.json) only
+          # data directories are rebuilt only from the meta branch .list files
           rm -rf ./community/data ./community/data-lite ./community/data-rs ./community/data-lite-rs
           mkdir -p ./community/data ./community/data-lite ./community/data-rs ./community/data-lite-rs
-          CUSTOM_GEO=./custom-src/geo
-          CUSTOM_LITE=./custom-src/geo-lite
-          [ -d "$CUSTOM_LITE" ] || CUSTOM_LITE="$CUSTOM_GEO"
-          CNLITE="cn-lite=./meta-src/geo/geosite/geolocation-cn.list,./meta-src/geo-lite/geosite/cn.list"
           # geosite  <- meta/geo/geosite ; cn-lite = geosite:geolocation-cn + geosite-lite:cn
           python3 /tmp/clean_list.py --kind geosite \
-            --src ./meta-src/geo/geosite --out ./community/data \
-            --rules "$GEOSITE_RULES" --extra "$CNLITE"
-          python3 /tmp/clean_list.py --kind geosite \
-            --src ./meta-src/geo/geosite --src "$CUSTOM_GEO/geosite" --out ./community/data-rs \
-            --rules "$GEOSITE_RULES" --extra "$CNLITE"
+            --src ./meta-src/geo/geosite --custom-src ./custom-src/geo/geosite \
+            --out ./community/data --out-rs ./community/data-rs \
+            --rules "$GEOSITE_RULES" \
+            --extra "cn-lite=./meta-src/geo/geosite/geolocation-cn.list,./meta-src/geo-lite/geosite/cn.list"
           # geosite-lite  <- meta/geo-lite/geosite
           python3 /tmp/clean_list.py --kind geosite \
-            --src ./meta-src/geo-lite/geosite --out ./community/data-lite \
-            --rules "$GEOSITE_LITE_RULES"
-          python3 /tmp/clean_list.py --kind geosite \
-            --src ./meta-src/geo-lite/geosite --src "$CUSTOM_LITE/geosite" --out ./community/data-lite-rs \
+            --src ./meta-src/geo-lite/geosite --custom-src ./custom-src/geo-lite/geosite \
+            --out ./community/data-lite --out-rs ./community/data-lite-rs \
             --rules "$GEOSITE_LITE_RULES"
           # category-ai-chat-!cn: add extra rules, then sort and de-duplicate
           for d in ./community/data ./community/data-lite ./community/data-rs ./community/data-lite-rs; do
@@ -358,30 +368,16 @@ jobs:
       - name: Clean geoip and geoip-lite from .list files
         run: |
           rm -rf ./geoip-data
-          CUSTOM_GEO=./custom-src/geo
-          CUSTOM_LITE=./custom-src/geo-lite
-          [ -d "$CUSTOM_LITE" ] || CUSTOM_LITE="$CUSTOM_GEO"
-          # geoip  <- meta/geo/geoip   (full = meta only, full-rs = meta + custom)
+          # geoip  <- meta/geo/geoip
           python3 /tmp/clean_list.py --kind geoip \
-            --src ./meta-src/geo/geoip --out ./geoip-data/full \
+            --src ./meta-src/geo/geoip --custom-src ./custom-src/geo/geoip \
+            --out ./geoip-data/full --out-rs ./geoip-data/full-rs \
             --rules "$GEOIP_RULES"
+          # geoip-lite  <- meta/geo-lite/geoip
           python3 /tmp/clean_list.py --kind geoip \
-            --src ./meta-src/geo/geoip --src "$CUSTOM_GEO/geoip" --out ./geoip-data/full-rs \
-            --rules "$GEOIP_RULES"
-          # geoip-lite  <- meta/geo-lite/geoip   (lite = meta only, lite-rs = meta + custom)
-          python3 /tmp/clean_list.py --kind geoip \
-            --src ./meta-src/geo-lite/geoip --out ./geoip-data/lite \
+            --src ./meta-src/geo-lite/geoip --custom-src ./custom-src/geo-lite/geoip \
+            --out ./geoip-data/lite --out-rs ./geoip-data/lite-rs \
             --rules "$GEOIP_LITE_RULES"
-          python3 /tmp/clean_list.py --kind geoip \
-            --src ./meta-src/geo-lite/geoip --src "$CUSTOM_LITE/geoip" --out ./geoip-data/lite-rs \
-            --rules "$GEOIP_LITE_RULES"
-
-      - name: Build merged geosite.dat (rule-set input only, not published)
-        run: |
-          cd custom || exit 1
-          go run ./ --datapath=../community/data-rs --exportlists="" --togfwlist=""
-          mkdir -p ../rs
-          mv ./publish/geosite.dat ../rs/geosite.dat
 
       - name: Build geosite.dat file
         run: |
@@ -396,11 +392,10 @@ jobs:
           mkdir -p data-lite
           go run ./ --datapath=./data-lite --outputname geosite-lite.dat
 
-      - name: Build merged geosite-lite.dat (rule-set input only, not published)
-        env:
-          NO_SKIP: true
+      - name: Build geosite rule-set dat files (meta + custom, only for .mrs/.yaml/.list)
         run: |
           cd community || exit 1
+          go run ./ --datapath=./data-rs --outputname geosite-rs.dat
           go run ./ --datapath=./data-lite-rs --outputname geosite-lite-rs.dat
 
       - name: Build geoip.dat relative files
@@ -415,7 +410,7 @@ jobs:
                     for f in sorted(os.listdir(src)) if f.endswith(".txt")]
           out = [{"type": "v2rayGeoIPDat", "action": "output",
                   "args": {"outputName": dat, "outputDir": os.path.abspath("geoip-out")}}]
-          if mmdb != "-":
+          if mmdb:
               out.append({"type": "maxmindMMDB", "action": "output",
                           "args": {"outputName": mmdb, "outputDir": os.path.abspath("geoip-out")}})
           json.dump({"input": inputs, "output": out}, open(cfg, "w"), indent=2)
@@ -423,9 +418,9 @@ jobs:
           }
           mk_config ./geoip-data/full geoip.dat country.mmdb ./geoip-full.json
           mk_config ./geoip-data/lite geoip-lite.dat country-lite.mmdb ./geoip-lite.json
-          # merged (meta + custom) dats: used only for rule-set conversion, never published
-          mk_config ./geoip-data/full-rs geoip-rs.dat - ./geoip-full-rs.json
-          mk_config ./geoip-data/lite-rs geoip-lite-rs.dat - ./geoip-lite-rs.json
+          # rule-set only dats: meta + custom-only lists, no mmdb
+          mk_config ./geoip-data/full-rs geoip-rs.dat "" ./geoip-full-rs.json
+          mk_config ./geoip-data/lite-rs geoip-lite-rs.dat "" ./geoip-lite-rs.json
           cd geoip-builder || exit 1
           go run ./ convert -c ../geoip-full.json
           go run ./ convert -c ../geoip-lite.json
@@ -453,7 +448,7 @@ jobs:
         run: |
           mkdir -p sing-rule/geo/geosite && mkdir -p sing-rule/geo/geoip
           cd convert
-          go run ./ geosite -f ../rs/geosite.dat -o ../sing-rule/geo/geosite -t sing-box
+          go run ./ geosite -f ../community/geosite-rs.dat -o ../sing-rule/geo/geosite -t sing-box
           go run ./ geoip -f ../geoip-out/geoip-rs.dat -o ../sing-rule/geo/geoip -t sing-box
 
       - name: Convert geo-lite to sing-rule-set
@@ -471,7 +466,7 @@ jobs:
         run: |
           mkdir -p meta-rule/geo/geosite && mkdir -p meta-rule/geo/geoip
           cd convert
-          go run ./ geosite -f ../rs/geosite.dat -o ../meta-rule/geo/geosite
+          go run ./ geosite -f ../community/geosite-rs.dat -o ../meta-rule/geo/geosite
           go run ./ geoip -f ../geoip-out/geoip-rs.dat -o ../meta-rule/geo/geoip
 
       - name: Convert geo-lite to meta-rule-set
