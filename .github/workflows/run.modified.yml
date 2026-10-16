@@ -36,7 +36,7 @@ jobs:
           #   => 保留 google、cn、bing；google 合并 google-cn，并去掉与 google@ads、google@cn 重复的规则
           # geosite 里的 cn-lite 由 geolocation-cn(geo) + cn(geo-lite) 合并而来，需要保留就写进变量
           # ---------------------------------------------------------------
-          echo "GEOSITE_RULES=google(+google-cn,-google-schola)|cn|cn-lite|bing" >> $GITHUB_ENV
+          echo "GEOSITE_RULES=google(+google-cn,-google-schola)|cn(-2)|cn-lite|bing|1(+cn)" >> $GITHUB_ENV
           echo "GEOSITE_LITE_RULES=google(+google-cn,-google-schola)|cn|cn-lite|bing" >> $GITHUB_ENV
           echo "GEOIP_RULES=cn|private|telegram|netflix" >> $GITHUB_ENV
           echo "GEOIP_LITE_RULES=cn|private|telegram|netflix" >> $GITHUB_ENV
