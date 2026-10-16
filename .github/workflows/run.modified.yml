@@ -193,8 +193,12 @@ jobs:
               return out
 
 
+          def geosite_line(t, v):
+              return v if t == 'domain' else t + ':' + v
+
+
           def fmt_geosite(rules):
-              lines = {(v if t == 'domain' else t + ':' + v) for t, v in rules}
+              lines = {geosite_line(t, v) for t, v in rules}
               return sorted(lines, key=lambda s: (s.lower(), s))
 
 
@@ -295,12 +299,29 @@ jobs:
               os.makedirs(args.out, exist_ok=True)
               if args.out_rs:
                   os.makedirs(args.out_rs, exist_ok=True)
-              written = 0
+
+              # "name@attr" cannot be a list/file name in v2fly's builder ("@" starts an attribute):
+              #   --out    (dat / mmdb ...)       -> written as plain "name"   (no attribute)
+              #   --out-rs (.mrs/.yaml/.list ...) -> written into list "name" with " @attr" on every
+              #                                      rule, so the converter still outputs "name@attr"
+              dat_plain = {}   # list name -> rules
+              dat_var = {}     # base name -> union of its name@attr variants
+              rs = {}          # base name -> {'plain': rules or None, 'attrs': {attr: rules}}
+
               for name, ops in items:
-                  if not name_ok.match(name):
-                      if not keep_all:
+                  if args.kind == 'geosite' and '@' in name:
+                      if keep_all:
+                          continue
+                      base, _, attr = name.partition('@')
+                      if not (name_ok.match(base) and name_ok.match(attr)):
                           warn('invalid list name, skipped: ' + name)
-                      continue
+                          continue
+                  else:
+                      base, attr = name, ''
+                      if not name_ok.match(name):
+                          if not keep_all:
+                              warn('invalid list name, skipped: ' + name)
+                          continue
                   data = get(name)
                   if data is None:
                       warn('%s not found in meta or custom source (%s), skipped' % (name, args.src))
@@ -326,20 +347,55 @@ jobs:
                           except Exception as e:
                               print('cannot read %s: %s' % (files[0], e))
                       continue
-                  fname = name if args.kind == 'geosite' else name + '.txt'
-                  text = '\n'.join(fmt(data)) + '\n'
                   in_meta = name in index or name in extra
-                  targets = ([args.out] if in_meta else []) + ([args.out_rs] if args.out_rs else [])
-                  for d in targets:
-                      with open(os.path.join(d, fname), 'w', encoding='utf-8') as f:
-                          f.write(text)
-                  print('%-32s %d rules  [%s]' % (name, len(data),
-                        ('meta' if name in index or name in extra else 'custom-only')
-                        + ('+custom' if name in cindex and in_meta else '')))
-                  if in_meta:
-                      written += 1
-              print('wrote %d lists to %s' % (written, args.out))
-              if written == 0:
+                  if attr:
+                      if in_meta:
+                          dat_var.setdefault(base, set()).update(data)
+                      if args.out_rs:
+                          rs.setdefault(base, {'plain': None, 'attrs': {}})['attrs'][attr] = data
+                  else:
+                      if in_meta:
+                          dat_plain[base] = data
+                      if args.out_rs:
+                          rs.setdefault(base, {'plain': None, 'attrs': {}})['plain'] = data
+                  print('%-32s %d rules  [%s]%s' % (
+                      name, len(data),
+                      ('meta' if in_meta else 'custom-only') + ('+custom' if name in cindex and in_meta else ''),
+                      ('  -> dat: ' + base) if attr else ''))
+
+              def write(d, base, lines):
+                  fname = base if args.kind == 'geosite' else base + '.txt'
+                  with open(os.path.join(d, fname), 'w', encoding='utf-8') as f:
+                      f.write('\n'.join(lines) + '\n')
+
+              final = dict(dat_plain)
+              for base, data in dat_var.items():
+                  if base in dat_plain:
+                      warn('"%s@..." skipped for dat output: plain list "%s" is already kept' % (base, base))
+                  else:
+                      final[base] = data
+              for base, data in final.items():
+                  write(args.out, base, fmt(data))
+
+              if args.out_rs:
+                  for base, e in rs.items():
+                      plain, attrs = e['plain'], e['attrs']
+                      lines = []
+                      tagged = {}
+                      for a_ in sorted(attrs):
+                          for r in attrs[a_]:
+                              tagged.setdefault(geosite_line(*r), []).append(a_)
+                      if plain is not None:
+                          lines += fmt(plain - set().union(*attrs.values()) if attrs else plain)
+                          if attrs:
+                              warn('"%s" and "%s@..." are both kept: in .mrs/.yaml/.list outputs "%s" also '
+                                   'contains the @attr rules' % (base, base, base))
+                      lines += [l + ''.join(' @' + a_ for a_ in tagged[l])
+                                for l in sorted(tagged, key=lambda x: (x.lower(), x))]
+                      write(args.out_rs, base, lines)
+
+              print('wrote %d lists to %s' % (len(final), args.out))
+              if not final:
                   print('::error::nothing written to ' + args.out)
                   sys.exit(1)
 
@@ -404,9 +460,9 @@ jobs:
 
       - name: Build geosite rule-set dat files (meta + custom, only for .mrs/.yaml/.list)
         run: |
-          cd custom || exit 1
-          go run ./ --datapath=../community/data-rs  geosite-rs.dat
-          go run ./ --datapath=../community/data-lite-rs  geosite-lite-rs.dat
+          cd community || exit 1
+          go run ./ --datapath=./data-rs --outputname geosite-rs.dat
+          go run ./ --datapath=./data-lite-rs --outputname geosite-lite-rs.dat
 
       - name: Build geoip.dat relative files
         run: |
@@ -458,7 +514,7 @@ jobs:
         run: |
           mkdir -p sing-rule/geo/geosite && mkdir -p sing-rule/geo/geoip
           cd convert
-          go run ./ geosite -f ../custom/publish/geosite-rs.dat -o ../sing-rule/geo/geosite -t sing-box
+          go run ./ geosite -f ../community/geosite-rs.dat -o ../sing-rule/geo/geosite -t sing-box
           go run ./ geoip -f ../geoip-out/geoip-rs.dat -o ../sing-rule/geo/geoip -t sing-box
 
       - name: Convert geo-lite to sing-rule-set
@@ -467,7 +523,7 @@ jobs:
         run: |
           mkdir -p sing-rule/geo-lite/geosite && mkdir -p sing-rule/geo-lite/geoip
           cd convert
-          go run ./ geosite -f ../custom/publish/geosite-lite-rs.dat -o ../sing-rule/geo-lite/geosite -t sing-box
+          go run ./ geosite -f ../community/geosite-lite-rs.dat -o ../sing-rule/geo-lite/geosite -t sing-box
           go run ./ geoip -f ../geoip-out/geoip-lite-rs.dat -o ../sing-rule/geo-lite/geoip -t sing-box
 
       - name: Convert geo to meta-rule-set
@@ -476,7 +532,7 @@ jobs:
         run: |
           mkdir -p meta-rule/geo/geosite && mkdir -p meta-rule/geo/geoip
           cd convert
-          go run ./ geosite -f ../custom/publish/geosite-rs.dat -o ../meta-rule/geo/geosite
+          go run ./ geosite -f ../community/geosite-rs.dat -o ../meta-rule/geo/geosite
           go run ./ geoip -f ../geoip-out/geoip-rs.dat -o ../meta-rule/geo/geoip
 
       - name: Convert geo-lite to meta-rule-set
@@ -485,7 +541,7 @@ jobs:
         run: |
           mkdir -p meta-rule/geo-lite/geosite && mkdir -p meta-rule/geo-lite/geoip
           cd convert
-          go run ./ geosite -f ../custom/publish/geosite-lite-rs.dat -o ../meta-rule/geo-lite/geosite
+          go run ./ geosite -f ../community/geosite-lite-rs.dat -o ../meta-rule/geo-lite/geosite
           go run ./ geoip -f ../geoip-out/geoip-lite-rs.dat -o ../meta-rule/geo-lite/geoip
 
       - name: Convert asn
