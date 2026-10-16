@@ -39,8 +39,8 @@ jobs:
           echo "GEOSITE_RULES=private|category-public-tracker(+tracker)|category-ads-all|bilibili(-bilibili-cdn,-bilibili-game)|cn(-private)|\
                             geolocation-cn(+cn-lite,-private,-category-public-tracker,-bilibili,-google,-apple,-microsoft)|\
                             geolocation-!cn(-private,-category-public-tracker,-category-ads-all,-18comic,-google,-apple,-microsoft,-category-entertainment,-category-social-media-!cn,-category-cryptocurrency,-category-ai-!cn)|\
-                            bahamut|bytedance-!cn|category-ai-!cn|category-games-!cn(-category-game-platforms-download)|category-social-media-!cn|category-cryptocurrency|\
-                            google|apple|microsoft|category-entertainment(-category-games-!cn,-bahamut,-bilibili,-bytedance-!cn)|18comic|\
+                            bahamut|bytedance|category-ai-!cn|category-games-!cn(-category-game-platforms-download)|category-social-media-!cn|category-cryptocurrency|\
+                            google|apple|microsoft|category-entertainment(-category-games-!cn,-bahamut,-bilibili,-bytedance)|18comic|\
                             my-REJECT|my-HK|my-JP|my-SG|my-TW|my-Rules|my-IPLocation|" >> $GITHUB_ENV
           echo "GEOSITE_LITE_RULES=private|bilibili|cn(-private)|\
                             bahamut|\
