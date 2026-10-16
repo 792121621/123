@@ -404,9 +404,9 @@ jobs:
 
       - name: Build geosite rule-set dat files (meta + custom, only for .mrs/.yaml/.list)
         run: |
-          cd community || exit 1
-          go run ./ --datapath=./data-rs --exportlists="" --togfwlist=""
-          go run ./ --datapath=./data-lite-rs --outputname geosite-lite.dat
+          cd custom || exit 1
+          go run ./ --datapath=../community/data-rs  geosite-rs.dat
+          go run ./ --datapath=../community/data-lite-rs  geosite-lite-rs.dat
 
       - name: Build geoip.dat relative files
         run: |
@@ -458,7 +458,7 @@ jobs:
         run: |
           mkdir -p sing-rule/geo/geosite && mkdir -p sing-rule/geo/geoip
           cd convert
-          go run ./ geosite -f ../community/geosite-rs.dat -o ../sing-rule/geo/geosite -t sing-box
+          go run ./ geosite -f ../custom/publish/geosite-rs.dat -o ../sing-rule/geo/geosite -t sing-box
           go run ./ geoip -f ../geoip-out/geoip-rs.dat -o ../sing-rule/geo/geoip -t sing-box
 
       - name: Convert geo-lite to sing-rule-set
@@ -467,7 +467,7 @@ jobs:
         run: |
           mkdir -p sing-rule/geo-lite/geosite && mkdir -p sing-rule/geo-lite/geoip
           cd convert
-          go run ./ geosite -f ../community/geosite-lite-rs.dat -o ../sing-rule/geo-lite/geosite -t sing-box
+          go run ./ geosite -f ../custom/publish/geosite-lite-rs.dat -o ../sing-rule/geo-lite/geosite -t sing-box
           go run ./ geoip -f ../geoip-out/geoip-lite-rs.dat -o ../sing-rule/geo-lite/geoip -t sing-box
 
       - name: Convert geo to meta-rule-set
@@ -476,7 +476,7 @@ jobs:
         run: |
           mkdir -p meta-rule/geo/geosite && mkdir -p meta-rule/geo/geoip
           cd convert
-          go run ./ geosite -f ../community/geosite-rs.dat -o ../meta-rule/geo/geosite
+          go run ./ geosite -f ../custom/publish/geosite-rs.dat -o ../meta-rule/geo/geosite
           go run ./ geoip -f ../geoip-out/geoip-rs.dat -o ../meta-rule/geo/geoip
 
       - name: Convert geo-lite to meta-rule-set
@@ -485,7 +485,7 @@ jobs:
         run: |
           mkdir -p meta-rule/geo-lite/geosite && mkdir -p meta-rule/geo-lite/geoip
           cd convert
-          go run ./ geosite -f ../community/geosite-lite-rs.dat -o ../meta-rule/geo-lite/geosite
+          go run ./ geosite -f ../custom/publish/geosite-lite-rs.dat -o ../meta-rule/geo-lite/geosite
           go run ./ geoip -f ../geoip-out/geoip-lite-rs.dat -o ../meta-rule/geo-lite/geoip
 
       - name: Convert asn
