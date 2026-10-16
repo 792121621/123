@@ -38,8 +38,10 @@ jobs:
           # ---------------------------------------------------------------
           echo "GEOSITE_RULES=google(+google-cn,-google-schola)|cn|cn-lite|bing" >> $GITHUB_ENV
           echo "GEOSITE_LITE_RULES=google(+google-cn,-google-schola)|cn|cn-lite|bing" >> $GITHUB_ENV
-          echo "GEOIP_RULES=cloudflare|cloudfront|facebook|fastly|google|netflix|telegram|twitter|private|cn|jp|hk|sg" >> $GITHUB_ENV
-          echo "GEOIP_LITE_RULES=apple|bilibili|cloudflare|cloudfront|facebook|google|netflix|telegram|twitter|private|cn|jp|hk|sg" >> $GITHUB_ENV
+          echo "GEOIP_RULES=private|cn|jp|hk|sg|\
+                            cloudflare|cloudfront|facebook|fastly|google|netflix|telegram|twitter" >> $GITHUB_ENV
+          echo "GEOIP_LITE_RULES=private|cn|jp|\
+                                apple|bilibili|cloudflare|cloudfront|facebook|google|netflix|telegram|twitter" >> $GITHUB_ENV
         shell: bash
 
       - name: Checkout the current repo
