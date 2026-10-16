@@ -26,20 +26,20 @@ jobs:
           # GEOIP_RULES         -> geoip
           # GEOIP_LITE_RULES    -> geoip-lite
           # (shell 变量名不能含 "-"，所以用下划线)
-          # 语法：  名称(+合并1,-去重1)|名称|名称
+          # 语法：  名称(+合并项,-去重项)|名称|名称
           #   "|"  分隔 —— 只保留这些名称对应的清洗文本（白名单），留空 = 保留全部
-          #   "()" 内用 "," 分隔：
+          #   "()" 内用 "," 分隔，按书写顺序依次处理：
           #     +x  把 x 的规则合并进该名称
           #     -x  从该名称里去掉与 x 重复的规则
-          #     没有 + 或 - 的项会被忽略
-          # 例：google(+google-cn,-google@ads,-google@cn)|cn(-2)|bing
-          #   => 保留 google、cn、bing；google 合并 google-cn，并去掉与 google@ads、google@cn 重复的规则
+          #     既不是 + 也不是 - 的项不做任何修改（会给出警告）
+          # 例：google(+google-cn,-google@ads)|cn|bing
+          #   => 保留 google、cn、bing 三个文件；google 先并入 google-cn，再去掉与 google@ads 重复的规则
           # geosite 里的 cn-lite 由 geolocation-cn(geo) + cn(geo-lite) 合并而来，需要保留就写进变量
           # ---------------------------------------------------------------
-          echo "GEOSITE_RULES=google(+google-cn,-google-schola)|cn(-2)|cn-lite|bing|1(+cn)" >> $GITHUB_ENV
+          echo "GEOSITE_RULES=google(+google-cn,-google-schola)|cn|cn-lite|bing" >> $GITHUB_ENV
           echo "GEOSITE_LITE_RULES=google(+google-cn,-google-schola)|cn|cn-lite|bing" >> $GITHUB_ENV
-          echo "GEOIP_RULES=cn|private|telegram|netflix" >> $GITHUB_ENV
-          echo "GEOIP_LITE_RULES=cn|private|telegram|netflix" >> $GITHUB_ENV
+          echo "GEOIP_RULES=cloudflare|cloudfront|facebook|fastly|google|netflix|telegram|twitter|private|cn" >> $GITHUB_ENV
+          echo "GEOIP_LITE_RULES=apple|bilibili|cloudflare|cloudfront|facebook|google|netflix|telegram|twitter|private|cn" >> $GITHUB_ENV
         shell: bash
 
       - name: Checkout the current repo
