@@ -44,12 +44,15 @@ jobs:
                             my-REJECT|my-HK|my-JP|my-SG|my-TW|my-Rules|my-IPLocation|" >> $GITHUB_ENV
           echo "GEOSITE_LITE_RULES=private|bilibili|cn(-private)|\
                             bahamut|\
-                            google|apple|microsoft|" >> $GITHUB_ENV
+                            google|apple|microsoft||\
+                            my-REJECT|my-HK|my-JP|my-SG|my-TW|my-Rules|my-IPLocation|" >> $GITHUB_ENV
           
           echo "GEOIP_RULES=private|cn|hk|jp|sg|tw|\
-                            cloudflare|cloudfront|facebook|fastly|google|netflix|telegram|twitter" >> $GITHUB_ENV
+                            cloudflare|cloudfront|facebook|fastly|google|netflix|telegram|twitter|\
+                            my-REJECT|my-HK|my-JP|my-SG|my-TW|my-Rules|my-IPLocation|" >> $GITHUB_ENV
           echo "GEOIP_LITE_RULES=private|cn|jp|\
-                                apple|bilibili|cloudflare|cloudfront|facebook|google|netflix|telegram|twitter" >> $GITHUB_ENV
+                                apple|bilibili|cloudflare|cloudfront|facebook|google|netflix|telegram|twitter|\
+                                my-REJECT|my-HK|my-JP|my-SG|my-TW|my-Rules|my-IPLocation|" >> $GITHUB_ENV
         shell: bash
 
       - name: Checkout the current repo
